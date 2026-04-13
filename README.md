@@ -38,9 +38,8 @@ pip install optuna numpy scikit-learn scipy Pillow seaborn wandb
 
 Download pretrained DINOv3 weights and place them under `../Pretrained_Models/`:
 
-- `dinov3_vits16_pretrain_lvd1689m-08c60483.pth` — ViT-S/16
-- `dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth` — ViT-B/16
-
+* **DINOv3-S** (ViT-S/16): [`dinov3_vits16_pretrain_lvd1689m-08c60483.pth`](https://entuedu-my.sharepoint.com/:u:/g/personal/haitian003_e_ntu_edu_sg/IQAYX3GOvRW-TqblUVXtEZF-AXRuz5w5JFLVEf-287QBcfI?e=XS9vRy)
+* **DINOv3-B** (ViT-B/16): [`dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth`](https://entuedu-my.sharepoint.com/:u:/g/personal/haitian003_e_ntu_edu_sg/IQDhyLd0zpL0QZUe39IYf_QFAbm_Uq-HwdoQJZbEauxd5cs?e=RYEI7Y)
 ## Training
 
 Edit `configs/train_config.yml` to set your dataset path and model configuration, then run:
