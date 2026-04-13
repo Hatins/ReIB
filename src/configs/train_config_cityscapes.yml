@@ -1,0 +1,113 @@
+output_root: '/home/haitian003/__workbase__/UMSS/self_cons2/SCON'
+pytorch_data_dir: '/home/haitian003/__dataset__/UMSS/CITYSCAPES'
+log_dir: "cityscapes"
+azureml_logging: False
+submitting_to_aml: False
+entity: "haitian003-nanyang-technological-university-singapore"
+num_workers: 24
+max_steps: 15000
+num_neighbors: 7
+dataset_name: "cityscapes"
+dir_dataset_name: ~
+dir_dataset_n_classes: 5
+has_labels: False
+crop_type: "five"
+crop_ratio: .5
+res: 224
+loader_crop_type: "center"
+# Model Params
+extra_clusters: 0
+use_true_labels: False
+use_recalibrator: False
+
+##############################
+project_name: "RecSeg" 
+batch_size: 32
+gpu_ids: "0,1"
+experiment_name: "SCON_Dinov3_vit_base_cityscapes"
+model_type: "vit_base"
+dino_version: "v3"
+dino_patch_size: 16
+dino_feat_type: "ori" # 'ori' or 'fea'
+##############################
+# Baseline parameters for cityscapes (to be searched)
+pos_inter_weight: 0.9829012962488451
+pos_intra_weight: 0.584126672340738
+neg_inter_weight: 0.9899766279358061
+neg_inter_shift: 0.5030466890737484
+pos_inter_shift: 0.10495899537810804
+pos_intra_shift: 0.9674672977679124
+recon_hidden_dim: 384
+soft_cluster_alpha: 5.133877453808817
+stego_loss_weight: 0.018920604156515402
+recon_loss_weight: 0.8151981054743007
+recon_lr: 0.0012946985368652276
+soft_cluster_lr: 0.0002546673030703573
+lr: 0.00011928208541026918
+###############################
+
+# ===== SCON2新增：重建loss相关参数 =====
+recon_type: "deep" # 'shallow' or 'deep'
+recon_loss_type: 'cosine' #['mse', 'cosine', 'relaxed_cosine', 'ssim']
+
+# pretrained_weights: "../Pretrained_Models/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+pretrained_weights: "../Pretrained_Models/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
+
+# pretrained_seg: "/home/haitian003/__workbase__/UMSS/self_cons2/Pretrained_Models/for_recons/step=7320-mIoU=19.13.ckpt"
+pretrained_seg: "/home/haitian003/__workbase__/UMSS/self_cons2/Pretrained_Models/for_recons/city_base.ckpt"
+
+
+##############################
+
+search_dim: False
+
+feature_samples: 11
+neg_samples: 4
+dim: 320
+
+arch: "dino"
+use_fit_model: False
+projection_type: "nonlinear"
+granularity: 1
+continuous: True
+dropout: True
+zero_clamp: True
+
+use_salience: False
+stabalize: False
+stop_at_zero: True
+
+# Feature Contrastive params
+pointwise: True
+aug_alignment_weight: 0.0
+correspondence_weight: 1.0
+rec_weight: 0.0
+repulsion_weight: 0.0
+
+# CRF Params
+crf_weight: 0.0
+alpha: .5
+beta: .15
+gamma: .05
+w1: 10.0
+w2: 3.0
+shift: 0.00
+crf_samples: 1000
+color_space: "rgb"
+reset_probe_steps: ~
+
+# Logging params
+n_images: 5
+scalar_log_freq: 10
+checkpoint_freq: 50
+val_freq: 10
+hist_freq: 100
+
+hydra:
+  run:
+    dir: ${output_root}
+  output_subdir: null
+  job_logging:
+    handlers:
+      file:
+        filename: ${output_root}/logs/${hydra.job.name}.log

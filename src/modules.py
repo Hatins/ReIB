@@ -1,0 +1,733 @@
+import torch
+import torch.nn as nn
+import sys
+from pathlib import Path
+
+from utils import *
+import torch.nn.functional as F
+import dino.vision_transformer as vits
+
+try:
+    from dinov3.hub.backbones import dinov3_vits16, dinov3_vitb16, dinov3_vitl16
+    DINOV3_AVAILABLE = True
+except ImportError as e:
+    DINOV3_AVAILABLE = False
+    print(f"Warning: DINOv3 not available: {e}")
+
+
+class LambdaLayer(nn.Module):
+    def __init__(self, lambd):
+        super(LambdaLayer, self).__init__()
+        self.lambd = lambd
+
+    def forward(self, x):
+        return self.lambd(x)
+
+
+class DinoFeaturizer(nn.Module):
+
+    def __init__(self, dim, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.dim = dim
+        patch_size = self.cfg.dino_patch_size
+        self.patch_size = patch_size
+        self.feat_type = self.cfg.dino_feat_type
+        arch = self.cfg.model_type
+        self.model = vits.__dict__[arch](
+            patch_size=patch_size,
+            num_classes=0)
+        for p in self.model.parameters():
+            p.requires_grad = False
+        self.model.eval().cuda()
+        self.dropout = torch.nn.Dropout2d(p=.1)
+
+        if arch == "vit_small" and patch_size == 16:
+            url = "dino_deitsmall16_pretrain/dino_deitsmall16_pretrain.pth"
+        elif arch == "vit_small" and patch_size == 8:
+            url = "dino_deitsmall8_300ep_pretrain/dino_deitsmall8_300ep_pretrain.pth"
+        elif arch == "vit_base" and patch_size == 16:
+            url = "dino_vitbase16_pretrain/dino_vitbase16_pretrain.pth"
+        elif arch == "vit_base" and patch_size == 8:
+            url = "dino_vitbase8_pretrain/dino_vitbase8_pretrain.pth"
+        else:
+            raise ValueError("Unknown arch and patch size")
+
+        print("Loading reference pretrained DINO weights.")
+        state_dict = torch.hub.load_state_dict_from_url(url="https://dl.fbaipublicfiles.com/dino/" + url)
+        self.model.load_state_dict(state_dict, strict=True)
+
+        # 计算特征维度：根据feat_type决定
+        base_dim = 384 if arch == "vit_small" else 768
+        if self.feat_type == "fea":
+            self.n_feats = base_dim * 3  # 三层拼接
+        else:  # ori
+            self.n_feats = base_dim  # 单层
+            
+        self.cluster1 = self.make_clusterer(self.n_feats)
+        self.proj_type = cfg.projection_type
+        if self.proj_type == "nonlinear":
+            self.cluster2 = self.make_nonlinear_clusterer(self.n_feats)
+
+    def make_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)))  # ,
+
+    def make_nonlinear_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, in_channels, (1, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)))
+
+    def forward(self, img, n=1, return_class_feat=False):
+        self.model.eval()
+        with torch.no_grad():
+            assert (img.shape[2] % self.patch_size == 0)
+            assert (img.shape[3] % self.patch_size == 0)
+
+            feat_h = img.shape[2] // self.patch_size
+            feat_w = img.shape[3] // self.patch_size
+            
+            # 根据特征类型决定提取多少层
+            if self.feat_type == "fea":
+                n_layers = 3  # 三层特征
+            else:
+                n_layers = n  # 单层
+            
+            feat_all, attn_all, qkv_all = self.model.get_intermediate_feat(img, n=n_layers)
+
+            if self.feat_type == "ori":
+                # 原始 STEGO: 单层 feat
+                feat = feat_all[0]
+                image_feat = feat[:, 1:, :].reshape(feat.shape[0], feat_h, feat_w, -1).permute(0, 3, 1, 2)
+                
+            elif self.feat_type == "fea":
+                # 三层 feat 拼接
+                # high level
+                feat = feat_all[-1]
+                image_feat_high = feat[:, 1:, :].reshape(feat.shape[0], feat_h, feat_w, -1).permute(0, 3, 1, 2)
+                
+                # mid level
+                feat_mid = feat_all[-2]
+                image_feat_mid = feat_mid[:, 1:, :].reshape(feat_mid.shape[0], feat_h, feat_w, -1).permute(0, 3, 1, 2)
+                
+                # low level
+                feat_low = feat_all[-3]
+                image_feat_low = feat_low[:, 1:, :].reshape(feat_low.shape[0], feat_h, feat_w, -1).permute(0, 3, 1, 2)
+                
+                # 拼接三层 feat
+                image_feat = torch.cat([image_feat_low, image_feat_mid, image_feat_high], dim=1)
+                
+            elif self.feat_type == "feat":
+                # 兼容旧的命名方式
+                feat = feat_all[0]
+                image_feat = feat[:, 1:, :].reshape(feat.shape[0], feat_h, feat_w, -1).permute(0, 3, 1, 2)
+            elif self.feat_type == "KK":
+                # 兼容旧的KK方式
+                feat_all_0, attn_all_0, qkv_all_0 = feat_all[0], attn_all[0], qkv_all[0]
+                image_k = qkv_all_0[1, :, :, 1:, :].reshape(feat_all_0.shape[0], 6, feat_h, feat_w, -1)
+                B, H, I, J, D = image_k.shape
+                image_feat = image_k.permute(0, 1, 4, 2, 3).reshape(B, H * D, I, J)
+            else:
+                raise ValueError("Unknown feat type:{}. Choose from ['ori', 'fea', 'feat', 'KK']".format(self.feat_type))
+
+            if return_class_feat:
+                feat = feat_all[0] if self.feat_type in ["ori", "feat"] else feat_all[-1]
+                return feat[:, :1, :].reshape(feat.shape[0], 1, 1, -1).permute(0, 3, 1, 2)
+
+        if self.proj_type is not None:
+            code = self.cluster1(self.dropout(image_feat))
+            if self.proj_type == "nonlinear":
+                code += self.cluster2(self.dropout(image_feat))
+        else:
+            code = image_feat
+
+        if self.cfg.dropout:
+            return self.dropout(image_feat), code
+        else:
+            return image_feat, code
+
+
+class Dinov3Featurizer(nn.Module):
+
+    def __init__(self, dim, cfg):
+        super().__init__()
+        if not DINOV3_AVAILABLE:
+            raise ImportError("DINOv3 is not available. Please install dinov3 package.")
+
+        self.cfg = cfg
+        self.dim = dim
+        self.patch_size = 16
+        self.feat_type = cfg.dino_feat_type
+        arch = cfg.model_type
+
+        arch_map = {
+            "vit_small": dinov3_vits16,
+            "vit_base": dinov3_vitb16,
+            "vit_large": dinov3_vitl16,
+        }
+        
+        if arch not in arch_map:
+            raise ValueError(f"Unknown arch: {arch}")
+        
+        self.model = arch_map[arch](pretrained=False)
+        
+        for p in self.model.parameters():
+            p.requires_grad = False
+        self.model.eval().cuda()
+        
+        self.dropout = torch.nn.Dropout2d(p=.1)
+
+        if cfg.pretrained_weights is not None:
+            state_dict = torch.load(cfg.pretrained_weights, map_location="cpu")
+            if "teacher" in state_dict:
+                state_dict = state_dict["teacher"]
+            elif "model" in state_dict:
+                state_dict = state_dict["model"]
+            
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+            state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
+            
+            msg = self.model.load_state_dict(state_dict, strict=False)
+            print('Pretrained weights found at {} and loaded with msg: {}'.format(cfg.pretrained_weights, msg))
+        else:
+            print("Warning: no pretrained weights provided for DINOv3")
+
+        if arch == "vit_small":
+            base_dim = 384
+        elif arch == "vit_base":
+            base_dim = 768
+        else:
+            base_dim = 1024
+        
+        # 根据 feat_type 决定特征维度
+        if self.feat_type == "fea":
+            self.n_feats = base_dim * 3  # 三层拼接
+        else:  # ori
+            self.n_feats = base_dim  # 单层
+        
+        self.cluster1 = self.make_clusterer(self.n_feats)
+        self.proj_type = cfg.projection_type
+        if self.proj_type == "nonlinear":
+            self.cluster2 = self.make_nonlinear_clusterer(self.n_feats)
+
+    def make_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)))
+
+    def make_nonlinear_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, in_channels, (1, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)))
+
+    def forward(self, img, n=1, return_class_feat=False):
+        self.model.eval()
+        with torch.no_grad():
+            assert (img.shape[2] % self.patch_size == 0)
+            assert (img.shape[3] % self.patch_size == 0)
+
+            feat_h = img.shape[2] // self.patch_size
+            feat_w = img.shape[3] // self.patch_size
+
+            if self.feat_type == "fea":
+                # 多层特征拼接模式：提取最后3层
+                # norm=True 会将特征标准化到单位方差，更适合训练
+                intermediate_outputs = self.model.get_intermediate_layers(
+                    img, n=3, reshape=True, return_class_token=return_class_feat, norm=True
+                )
+                
+                if return_class_feat:
+                    # 返回最后一层的class token
+                    _, cls_tokens = zip(*intermediate_outputs)
+                    return cls_tokens[-1].unsqueeze(-1).unsqueeze(-1)
+                
+                # 拼接最后三层的patch tokens
+                feats = list(intermediate_outputs)
+                image_feat = torch.cat([feats[-3], feats[-2], feats[-1]], dim=1)
+                
+            else:  # ori mode
+                # 单层特征模式：只使用forward_features
+                output = self.model.forward_features(img)
+                
+                if return_class_feat:
+                    cls_token = output['x_norm_clstoken']
+                    return cls_token.unsqueeze(-1).unsqueeze(-1)
+                
+                patch_tokens = output['x_norm_patchtokens']
+                B, N, D = patch_tokens.shape
+                assert N == feat_h * feat_w, "Token count mismatch! Registers present?"
+                image_feat = patch_tokens.permute(0, 2, 1).reshape(B, D, feat_h, feat_w)
+
+        if self.proj_type is not None:
+            code = self.cluster1(self.dropout(image_feat))
+            if self.proj_type == "nonlinear":
+                code += self.cluster2(self.dropout(image_feat))
+        else:
+            code = image_feat
+
+        if self.cfg.dropout:
+            return self.dropout(image_feat), code
+        else:
+            return image_feat, code
+
+
+class ResizeAndClassify(nn.Module):
+
+    def __init__(self, dim: int, size: int, n_classes: int):
+        super(ResizeAndClassify, self).__init__()
+        self.size = size
+        self.predictor = torch.nn.Sequential(
+            torch.nn.Conv2d(dim, n_classes, (1, 1)),
+            torch.nn.LogSoftmax(1))
+
+    def forward(self, x):
+        return F.interpolate(self.predictor.forward(x), self.size, mode="bilinear", align_corners=False)
+
+
+class ClusterLookup(nn.Module):
+
+    def __init__(self, dim: int, n_classes: int):
+        super(ClusterLookup, self).__init__()
+        self.n_classes = n_classes
+        self.dim = dim
+        self.clusters = torch.nn.Parameter(torch.randn(n_classes, dim))
+
+    def reset_parameters(self):
+        with torch.no_grad():
+            self.clusters.copy_(torch.randn(self.n_classes, self.dim))
+
+    def forward(self, x, alpha, log_probs=False):
+        normed_clusters = F.normalize(self.clusters, dim=1)
+        normed_features = F.normalize(x, dim=1)
+        inner_products = torch.einsum("bchw,nc->bnhw", normed_features, normed_clusters)
+
+        if alpha is None:
+            cluster_probs = F.one_hot(torch.argmax(inner_products, dim=1), self.clusters.shape[0]) \
+                .permute(0, 3, 1, 2).to(torch.float32)
+        else:
+            cluster_probs = nn.functional.softmax(inner_products * alpha, dim=1)
+
+        cluster_loss = -(cluster_probs * inner_products).sum(1).mean()
+        if log_probs:
+            return nn.functional.log_softmax(inner_products * alpha, dim=1)
+        else:
+            return cluster_loss, cluster_probs
+
+
+class FeaturePyramidNet(nn.Module):
+
+    @staticmethod
+    def _helper(x):
+        # TODO remove this hard coded 56
+        return F.interpolate(x, 56, mode="bilinear", align_corners=False).unsqueeze(-1)
+
+    def make_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)),
+            LambdaLayer(FeaturePyramidNet._helper))
+
+    def make_nonlinear_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, in_channels, (1, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(in_channels, in_channels, (1, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)),
+            LambdaLayer(FeaturePyramidNet._helper))
+
+    def __init__(self, granularity, cut_model, dim, continuous):
+        super(FeaturePyramidNet, self).__init__()
+        self.layer_nums = [5, 6, 7]
+        self.spatial_resolutions = [7, 14, 28, 56]
+        self.feat_channels = [2048, 1024, 512, 3]
+        self.extra_channels = [128, 64, 32, 32]
+        self.granularity = granularity
+        self.encoder = NetWithActivations(cut_model, self.layer_nums)
+        self.dim = dim
+        self.continuous = continuous
+        self.n_feats = self.dim
+
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+
+        assert granularity in {1, 2, 3, 4}
+        self.cluster1 = self.make_clusterer(self.feat_channels[0])
+        self.cluster1_nl = self.make_nonlinear_clusterer(self.feat_channels[0])
+
+        if granularity >= 2:
+            # self.conv1 = DoubleConv(self.feat_channels[0], self.extra_channels[0])
+            # self.conv2 = DoubleConv(self.extra_channels[0] + self.feat_channels[1], self.extra_channels[1])
+            self.conv2 = DoubleConv(self.feat_channels[0] + self.feat_channels[1], self.extra_channels[1])
+            self.cluster2 = self.make_clusterer(self.extra_channels[1])
+        if granularity >= 3:
+            self.conv3 = DoubleConv(self.extra_channels[1] + self.feat_channels[2], self.extra_channels[2])
+            self.cluster3 = self.make_clusterer(self.extra_channels[2])
+        if granularity >= 4:
+            self.conv4 = DoubleConv(self.extra_channels[2] + self.feat_channels[3], self.extra_channels[3])
+            self.cluster4 = self.make_clusterer(self.extra_channels[3])
+
+    def c(self, x, y):
+        return torch.cat([x, y], dim=1)
+
+    def forward(self, x):
+        with torch.no_grad():
+            feats = self.encoder(x)
+        low_res_feats = feats[self.layer_nums[-1]]
+
+        all_clusters = []
+
+        # all_clusters.append(self.cluster1(low_res_feats) + self.cluster1_nl(low_res_feats))
+        all_clusters.append(self.cluster1(low_res_feats))
+
+        if self.granularity >= 2:
+            # f1 = self.conv1(low_res_feats)
+            # f1_up = self.up(f1)
+            f1_up = self.up(low_res_feats)
+            f2 = self.conv2(self.c(f1_up, feats[self.layer_nums[-2]]))
+            all_clusters.append(self.cluster2(f2))
+        if self.granularity >= 3:
+            f2_up = self.up(f2)
+            f3 = self.conv3(self.c(f2_up, feats[self.layer_nums[-3]]))
+            all_clusters.append(self.cluster3(f3))
+        if self.granularity >= 4:
+            f3_up = self.up(f3)
+            final_size = self.spatial_resolutions[-1]
+            f4 = self.conv4(self.c(f3_up, F.interpolate(
+                x, (final_size, final_size), mode="bilinear", align_corners=False)))
+            all_clusters.append(self.cluster4(f4))
+
+        avg_code = torch.cat(all_clusters, 4).mean(4)
+
+        if self.continuous:
+            clusters = avg_code
+        else:
+            clusters = torch.log_softmax(avg_code, 1)
+
+        return low_res_feats, clusters
+
+
+class DoubleConv(nn.Module):
+    """(convolution => [BN] => ReLU) * 2"""
+
+    def __init__(self, in_channels, out_channels, mid_channels=None):
+        super().__init__()
+        if not mid_channels:
+            mid_channels = out_channels
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+def norm(t):
+    return F.normalize(t, dim=1, eps=1e-10)
+
+
+def average_norm(t):
+    return t / t.square().sum(1, keepdim=True).sqrt().mean()
+
+
+def tensor_correlation(a, b):
+    return torch.einsum("nchw,ncij->nhwij", a, b)
+
+
+def sample(t: torch.Tensor, coords: torch.Tensor):
+    return F.grid_sample(t, coords.permute(0, 2, 1, 3), padding_mode='border', align_corners=True)
+
+
+@torch.jit.script
+def super_perm(size: int, device: torch.device):
+    perm = torch.randperm(size, device=device, dtype=torch.long)
+    perm[perm == torch.arange(size, device=device)] += 1
+    return perm % size
+
+
+def sample_nonzero_locations(t, target_size):
+    nonzeros = torch.nonzero(t)
+    coords = torch.zeros(target_size, dtype=nonzeros.dtype, device=nonzeros.device)
+    n = target_size[1] * target_size[2]
+    for i in range(t.shape[0]):
+        selected_nonzeros = nonzeros[nonzeros[:, 0] == i]
+        if selected_nonzeros.shape[0] == 0:
+            selected_coords = torch.randint(t.shape[1], size=(n, 2), device=nonzeros.device)
+        else:
+            selected_coords = selected_nonzeros[torch.randint(len(selected_nonzeros), size=(n,)), 1:]
+        coords[i, :, :, :] = selected_coords.reshape(target_size[1], target_size[2], 2)
+    coords = coords.to(torch.float32) / t.shape[1]
+    coords = coords * 2 - 1
+    return torch.flip(coords, dims=[-1])
+
+
+class ContrastiveCorrelationLoss(nn.Module):
+
+    def __init__(self, cfg, ):
+        super(ContrastiveCorrelationLoss, self).__init__()
+        self.cfg = cfg
+
+    def standard_scale(self, t):
+        t1 = t - t.mean()
+        t2 = t1 / t1.std()
+        return t2
+
+    def helper(self, f1, f2, c1, c2, shift):
+        with torch.no_grad():
+            # Comes straight from backbone which is currently frozen. this saves mem.
+            fd = tensor_correlation(norm(f1), norm(f2))
+
+            if self.cfg.pointwise:
+                old_mean = fd.mean()
+                fd -= fd.mean([3, 4], keepdim=True)
+                fd = fd - fd.mean() + old_mean
+
+        cd = tensor_correlation(norm(c1), norm(c2))
+
+        if self.cfg.zero_clamp:
+            min_val = 0.0
+        else:
+            min_val = -9999.0
+
+        if self.cfg.stabalize:
+            loss = - cd.clamp(min_val, .8) * (fd - shift)
+        else:
+            loss = - cd.clamp(min_val) * (fd - shift)
+
+        return loss, cd
+
+    def forward(self,
+                orig_feats: torch.Tensor, orig_feats_pos: torch.Tensor,
+                orig_salience: torch.Tensor, orig_salience_pos: torch.Tensor,
+                orig_code: torch.Tensor, orig_code_pos: torch.Tensor,
+                ):
+
+        coord_shape = [orig_feats.shape[0], self.cfg.feature_samples, self.cfg.feature_samples, 2]
+
+        if self.cfg.use_salience:
+            coords1_nonzero = sample_nonzero_locations(orig_salience, coord_shape)
+            coords2_nonzero = sample_nonzero_locations(orig_salience_pos, coord_shape)
+            coords1_reg = torch.rand(coord_shape, device=orig_feats.device) * 2 - 1
+            coords2_reg = torch.rand(coord_shape, device=orig_feats.device) * 2 - 1
+            mask = (torch.rand(coord_shape[:-1], device=orig_feats.device) > .1).unsqueeze(-1).to(torch.float32)
+            coords1 = coords1_nonzero * mask + coords1_reg * (1 - mask)
+            coords2 = coords2_nonzero * mask + coords2_reg * (1 - mask)
+        else:
+            coords1 = torch.rand(coord_shape, device=orig_feats.device) * 2 - 1
+            coords2 = torch.rand(coord_shape, device=orig_feats.device) * 2 - 1
+
+        feats = sample(orig_feats, coords1)
+        code = sample(orig_code, coords1)
+
+        feats_pos = sample(orig_feats_pos, coords2)
+        code_pos = sample(orig_code_pos, coords2)
+
+        pos_intra_loss, pos_intra_cd = self.helper(
+            feats, feats, code, code, self.cfg.pos_intra_shift)
+        pos_inter_loss, pos_inter_cd = self.helper(
+            feats, feats_pos, code, code_pos, self.cfg.pos_inter_shift)
+
+        neg_losses = []
+        neg_cds = []
+        for i in range(self.cfg.neg_samples):
+            perm_neg = super_perm(orig_feats.shape[0], orig_feats.device)
+            feats_neg = sample(orig_feats[perm_neg], coords2)
+            code_neg = sample(orig_code[perm_neg], coords2)
+            neg_inter_loss, neg_inter_cd = self.helper(
+                feats, feats_neg, code, code_neg, self.cfg.neg_inter_shift)
+            neg_losses.append(neg_inter_loss)
+            neg_cds.append(neg_inter_cd)
+        neg_inter_loss = torch.cat(neg_losses, axis=0)
+        neg_inter_cd = torch.cat(neg_cds, axis=0)
+
+        return (pos_intra_loss.mean(),
+                pos_intra_cd,
+                pos_inter_loss.mean(),
+                pos_inter_cd,
+                neg_inter_loss,
+                neg_inter_cd)
+
+
+class Decoder(nn.Module):
+    def __init__(self, code_channels, feat_channels):
+        super().__init__()
+        self.linear = torch.nn.Conv2d(code_channels, feat_channels, (1, 1))
+        self.nonlinear = torch.nn.Sequential(
+            torch.nn.Conv2d(code_channels, code_channels, (1, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(code_channels, code_channels, (1, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(code_channels, feat_channels, (1, 1)))
+
+    def forward(self, x):
+        return self.linear(x) + self.nonlinear(x)
+
+
+class NetWithActivations(torch.nn.Module):
+    def __init__(self, model, layer_nums):
+        super(NetWithActivations, self).__init__()
+        self.layers = nn.ModuleList(model.children())
+        self.layer_nums = []
+        for l in layer_nums:
+            if l < 0:
+                self.layer_nums.append(len(self.layers) + l)
+            else:
+                self.layer_nums.append(l)
+        self.layer_nums = set(sorted(self.layer_nums))
+
+    def forward(self, x):
+        activations = {}
+        for ln, l in enumerate(self.layers):
+            x = l(x)
+            if ln in self.layer_nums:
+                activations[ln] = x
+        return activations
+
+
+class ContrastiveCRFLoss(nn.Module):
+
+    def __init__(self, n_samples, alpha, beta, gamma, w1, w2, shift):
+        super(ContrastiveCRFLoss, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.w1 = w1
+        self.w2 = w2
+        self.n_samples = n_samples
+        self.shift = shift
+
+    def forward(self, guidance, clusters):
+        device = clusters.device
+        assert (guidance.shape[0] == clusters.shape[0])
+        assert (guidance.shape[2:] == clusters.shape[2:])
+        h = guidance.shape[2]
+        w = guidance.shape[3]
+
+        coords = torch.cat([
+            torch.randint(0, h, size=[1, self.n_samples], device=device),
+            torch.randint(0, w, size=[1, self.n_samples], device=device)], 0)
+
+        selected_guidance = guidance[:, :, coords[0, :], coords[1, :]]
+        coord_diff = (coords.unsqueeze(-1) - coords.unsqueeze(1)).square().sum(0).unsquesize(0)
+        guidance_diff = (selected_guidance.unsqueeze(-1) - selected_guidance.unsqueeze(2)).square().sum(1)
+
+        sim_kernel = self.w1 * torch.exp(- coord_diff / (2 * self.alpha) - guidance_diff / (2 * self.beta)) + \
+                     self.w2 * torch.exp(- coord_diff / (2 * self.gamma)) - self.shift
+
+        selected_clusters = clusters[:, :, coords[0, :], coords[1, :]]
+        cluster_sims = torch.einsum("nka,nkb->nab", selected_clusters, selected_clusters)
+        return -(cluster_sims * sim_kernel)
+
+
+class ReconstructionNet(nn.Module):
+    """重建网络：将软聚类概率重建为DINO特征
+    
+    输入: cluster_probs (B, n_classes, H, W) - 软聚类概率
+    输出: reconstructed_features (B, feature_dim, H, W) - 重建的DINO特征
+    
+    设计思路：
+    - 使用多层卷积将n_classes通道扩展到feature_dim通道
+    - 采用残差连接帮助训练
+    - 使用BatchNorm和ReLU激活
+    """
+    
+    def __init__(self, n_classes, feature_dim, hidden_dim=128):
+        super(ReconstructionNet, self).__init__()
+        self.n_classes = n_classes
+        self.feature_dim = feature_dim
+        
+        # 三层卷积网络：n_classes -> hidden_dim -> hidden_dim -> feature_dim
+        self.conv1 = nn.Conv2d(n_classes, hidden_dim, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(hidden_dim)
+        
+        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(hidden_dim)
+        
+        self.conv3 = nn.Conv2d(hidden_dim, feature_dim, kernel_size=1)
+        
+        self.relu = nn.ReLU(inplace=True)
+        
+    def forward(self, cluster_probs):
+        """
+        Args:
+            cluster_probs: (B, n_classes, H, W) 软聚类概率
+            
+        Returns:
+            reconstructed_features: (B, feature_dim, H, W) 重建的特征
+        """
+        x = self.conv1(cluster_probs)
+        x = self.bn1(x)
+        x = self.relu(x)
+        
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu(x)
+        
+        x = self.conv3(x)
+        
+        return x
+
+
+class DeepReconstructionNet(nn.Module):
+    """深度重建网络（4层）：将软聚类概率重建为DINO特征
+    
+    适用于大模型如 vit_base
+    
+    输入: cluster_probs (B, n_classes, H, W) - 软聚类概率
+    输出: reconstructed_features (B, feature_dim, H, W) - 重建的DINO特征
+    
+    设计思路：
+    - 使用4层卷积（比3层多1层）提升重建能力
+    - 添加残差连接帮助梯度传播
+    - 适合更大的特征维度（如768维）
+    """
+    
+    def __init__(self, n_classes, feature_dim, hidden_dim=128):
+        super(DeepReconstructionNet, self).__init__()
+        self.n_classes = n_classes
+        self.feature_dim = feature_dim
+        
+        # 四层卷积网络：n_classes -> hidden_dim -> hidden_dim -> hidden_dim -> feature_dim
+        self.conv1 = nn.Conv2d(n_classes, hidden_dim, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(hidden_dim)
+        
+        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(hidden_dim)
+        
+        self.conv3 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(hidden_dim)
+        
+        self.conv4 = nn.Conv2d(hidden_dim, feature_dim, kernel_size=1)
+        
+        self.relu = nn.ReLU(inplace=True)
+        
+    def forward(self, cluster_probs):
+        """
+        Args:
+            cluster_probs: (B, n_classes, H, W) 软聚类概率
+            
+        Returns:
+            reconstructed_features: (B, feature_dim, H, W) 重建的特征
+        """
+        x = self.conv1(cluster_probs)
+        x = self.bn1(x)
+        x = self.relu(x)
+        
+        identity = x  # 保存用于残差连接
+        
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu(x)
+        
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = x + identity  # 残差连接
+        x = self.relu(x)
+        
+        x = self.conv4(x)
+        
+        return x

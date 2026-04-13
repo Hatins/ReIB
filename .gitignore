@@ -1,0 +1,42 @@
+# Checkpoints and large model files
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Hyperparameter optimization
+optuna_db/
+optuna_snapshots/
+
+# Experiment tracking
+wandb/
+
+# Data directories
+data/
+
+# Logs
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

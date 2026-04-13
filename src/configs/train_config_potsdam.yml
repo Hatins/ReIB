@@ -1,0 +1,112 @@
+output_root: '/home/haitian003/__workbase__/UMSS/self_cons2/SCON'
+pytorch_data_dir: '/home/haitian003/__dataset__/UMSS/POTSDAM'
+log_dir: "potsdam"
+azureml_logging: False
+submitting_to_aml: False
+entity: "haitian003-nanyang-technological-university-singapore"
+num_workers: 24
+max_steps: 10000
+num_neighbors: 5
+dataset_name: "potsdam"
+dir_dataset_name: ~
+dir_dataset_n_classes: 3
+has_labels: False
+crop_type: ~
+crop_ratio: ~
+res: 224
+loader_crop_type: "center"
+# Model Params
+extra_clusters: 0
+use_true_labels: False
+use_recalibrator: False
+
+##############################
+project_name: "RecSeg" 
+batch_size: 32
+gpu_ids: "0,1"
+experiment_name: "SCON_Dinov3_vit_base_potsdam"
+model_type: "vit_base"
+dino_version: "v3"
+dino_patch_size: 16
+dino_feat_type: "ori" # 'ori' or 'fea'
+##############################
+# Baseline parameters for potsdam (initial values, can be tuned)
+pos_inter_weight: 0.08130923121542058
+pos_intra_weight: 0.9476088061702643
+neg_inter_weight: 0.7878295836995054
+neg_inter_shift: 0.5794275870202114
+pos_inter_shift: 0.17943606893081565
+pos_intra_shift: 0.8312362359269649
+recon_hidden_dim: 512
+soft_cluster_alpha: 0.628967902625208
+stego_loss_weight: 0.059002173962353105
+recon_loss_weight: 0.7101462390669047
+recon_lr: 0.0003886570017836258
+soft_cluster_lr: 0.009059389733629205
+lr: 1.1446895790646059e-05
+###############################
+
+# ===== SCON2新增：重建loss相关参数 =====
+recon_type: "deep" # 'shallow' or 'deep'
+recon_loss_type: 'cosine' #['mse', 'cosine', 'relaxed_cosine', 'ssim']
+
+# pretrained_weights: "../Pretrained_Models/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+pretrained_weights: "../Pretrained_Models/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
+
+# pretrained_seg: 如果有potsdam的预训练权重可以在这里指定
+pretrained_seg: "/home/haitian003/__workbase__/UMSS/self_cons2/Pretrained_Models/for_recons/step=1848-mIoU=77.22.ckpt"
+
+##############################
+
+search_dim: False
+
+feature_samples: 14
+neg_samples: 4
+dim: 192
+
+arch: "dino"
+use_fit_model: False
+projection_type: "nonlinear"
+granularity: 1
+continuous: True
+dropout: True
+zero_clamp: True
+
+use_salience: False
+stabalize: False
+stop_at_zero: True
+
+# Feature Contrastive params
+pointwise: True
+aug_alignment_weight: 0.0
+correspondence_weight: 1.0
+rec_weight: 0.0
+repulsion_weight: 0.0
+
+# CRF Params
+crf_weight: 0.0
+alpha: .5
+beta: .15
+gamma: .05
+w1: 10.0
+w2: 3.0
+shift: 0.00
+crf_samples: 1000
+color_space: "rgb"
+reset_probe_steps: ~
+
+# Logging params
+n_images: 5
+scalar_log_freq: 10
+checkpoint_freq: 50
+val_freq: 10
+hist_freq: 100
+
+hydra:
+  run:
+    dir: ${output_root}
+  output_subdir: null
+  job_logging:
+    handlers:
+      file:
+        filename: ${output_root}/logs/${hydra.job.name}.log
