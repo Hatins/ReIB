@@ -56,12 +56,16 @@ python hyperparameter_search_epoch.py
 
 ## Evaluation
 
+| Dataset | Variant | Download Link |
+| :--- | :--- | :--- |
+| **COCO-Stuff** | Small | [Download Link](https://entuedu-my.sharepoint.com/:u:/g/personal/haitian003_e_ntu_edu_sg/IQAmotg1_dY7TZaNmGDqfZ12AWBeal-0oFoC2E2q1f-Ztts?e=BwKR1G) |
+| | Base | [Download Link](https://entuedu-my.sharepoint.com/:u:/g/personal/haitian003_e_ntu_edu_sg/IQAmotg1_dY7TZaNmGDqfZ12AWBeal-0oFoC2E2q1f-Ztts?e=BwKR1G) |
+| **Cityscapes** | Small | [Download Link](https://entuedu-my.sharepoint.com/:u:/g/personal/haitian003_e_ntu_edu_sg/IQCScnTtTCJkTbwM--8H06EhAWY_-4DqpnjrHl5Z5UKVJNQ?e=sWFo8e) |
+| | Base | [Download Link](https://entuedu-my.sharepoint.com/:u:/g/personal/haitian003_e_ntu_edu_sg/IQD1moSgGF9aQooctOt1xOCUAasRp3UJllT0PGAX6t1BXgw?e=Qg6V6M) |
+| **Potsdam-3** | - | [Download Link](https://entuedu-my.sharepoint.com/:u:/g/personal/haitian003_e_ntu_edu_sg/IQC14axtwOqaR47uAChbTxQgAZVkawyy9jbceZ3sOajQTgI?e=PgG7yN) |
+
 ```bash
 python eval_segmentation.py
 ```
 
-## Supported Datasets
 
-- COCO-Stuff 27
-- Cityscapes
-- Potsdam
