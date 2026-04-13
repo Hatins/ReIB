@@ -2,7 +2,7 @@
 
 ReIB is an unsupervised semantic segmentation framework based on the **Reversible Information Bottleneck** principle. It leverages pretrained DINOv3 features and introduces a reconstruction-guided contrastive learning objective to learn compact yet reversible representations, enabling high-quality dense clustering without any pixel-level annotations.
 
-[Framework](Framework.pdf)
+[Framework.pdf](Framework.pdf)
 
 ## Environment
 
